@@ -13,6 +13,9 @@ const config: Config = {
           750: '#0f1729',
         },
       },
+      animation: {
+        'spin': 'spin 1s linear infinite',
+      },
     },
   },
   plugins: [],

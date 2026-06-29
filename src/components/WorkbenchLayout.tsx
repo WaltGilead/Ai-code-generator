@@ -5,17 +5,34 @@ import { ChatPanel } from './ChatPanel';
 import { EditorPanel } from './EditorPanel';
 import { PreviewPanel } from './PreviewPanel';
 import { TerminalPanel } from './TerminalPanel';
+import { AlertCircle } from 'lucide-react';
 
 type TabType = 'editor' | 'preview' | 'terminal';
 
 export function WorkbenchLayout() {
   const [activeTab, setActiveTab] = useState<TabType>('editor');
+  const [showError, setShowError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const handleError = (message: string) => {
+    setErrorMessage(message);
+    setShowError(true);
+    setTimeout(() => setShowError(false), 5000);
+  };
 
   return (
     <div className="flex h-screen gap-4 p-4 bg-slate-900">
+      {/* Error Banner */}
+      {showError && (
+        <div className="fixed top-4 left-4 right-4 bg-red-600 text-white p-4 rounded-lg shadow-lg flex items-center gap-2 z-50">
+          <AlertCircle className="h-5 w-5" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
+
       {/* Left Panel: Chat */}
       <div className="w-1/3 flex flex-col bg-slate-800 rounded-lg shadow-lg border border-slate-700 overflow-hidden">
-        <ChatPanel />
+        <ChatPanel onError={handleError} />
       </div>
 
       {/* Right Panel: Workbench */}

@@ -1,124 +1,141 @@
 'use client';
 
-import { useEffect, useCallback, useState } from 'react';
-import { WebContainer, FileSystemTree } from '@webcontainer/api';
+import { useEffect, useRef, useState } from 'react';
+import { WebContainer } from '@webcontainer/api';
 import { useProjectStore } from '@/store/projectStore';
-import { WebContainerError } from '@/utils/errorHandling';
 
-export interface UseWebContainerReturn {
+export interface WebContainerInstance {
   instance: WebContainer | null;
   isReady: boolean;
   error: string | null;
-  writeFile: (path: string, content: string) => Promise<void>;
-  readFile: (path: string) => Promise<string>;
-  runCommand: (command: string, onOutput?: (output: string) => void) => Promise<number>;
-  getServerUrl: (port?: number) => string | null;
 }
 
-export function useWebContainer(): UseWebContainerReturn {
-  const [state, setState] = useState({
-    instance: null as WebContainer | null,
+export function useWebContainer() {
+  const [state, setState] = useState<WebContainerInstance>({
+    instance: null,
     isReady: false,
-    error: null as string | null,
+    error: null,
   });
 
   const projectStore = useProjectStore();
+  const instanceRef = useRef<WebContainer | null>(null);
+  const bootAttempts = useRef(0);
+  const maxBootAttempts = 3;
 
-  // Boot WebContainer on mount
   useEffect(() => {
-    const bootContainer = async () => {
+    const bootWebContainer = async () => {
       try {
+        bootAttempts.current++;
         const instance = await WebContainer.boot();
+        instanceRef.current = instance;
         setState({ instance, isReady: true, error: null });
-        projectStore.setIsRunning(true);
+        console.log('WebContainer booted successfully');
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to boot WebContainer';
-        setState({ instance: null, isReady: false, error: message });
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        console.error('WebContainer boot error:', errorMessage);
+
+        if (bootAttempts.current < maxBootAttempts) {
+          console.log(`Retrying boot (attempt ${bootAttempts.current}/${maxBootAttempts})`);
+          setTimeout(bootWebContainer, 2000);
+        } else {
+          setState({
+            instance: null,
+            isReady: false,
+            error: `Failed to initialize WebContainer after ${maxBootAttempts} attempts: ${errorMessage}`,
+          });
+        }
       }
     };
 
-    bootContainer();
-  }, [projectStore]);
+    bootWebContainer();
+  }, []);
 
-  const writeFile = useCallback(
-    async (path: string, content: string) => {
-      if (!state.instance) {
-        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
+  const writeFile = async (path: string, content: string) => {
+    if (!instanceRef.current) {
+      throw new Error('WebContainer not initialized');
+    }
+
+    try {
+      // Ensure directory exists
+      const dirs = path.split('/').slice(0, -1);
+      if (dirs.length > 0) {
+        const dirPath = dirs.join('/');
+        try {
+          await instanceRef.current.fs.mkdir(dirPath, { recursive: true });
+        } catch (e) {
+          // Directory might already exist
+        }
       }
 
-      try {
-        await state.instance.fs.writeFile(path, content);
-        projectStore.updateFile(path, content);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to write file';
-        throw new WebContainerError(message, 'FILE_WRITE_FAILED');
-      }
-    },
-    [state.instance, projectStore]
-  );
+      await instanceRef.current.fs.writeFile(path, content);
+      projectStore.updateFile(path, content);
+      console.log(`File written: ${path}`);
+    } catch (error) {
+      console.error(`Failed to write file ${path}:`, error);
+      throw error;
+    }
+  };
 
-  const readFile = useCallback(
-    async (path: string): Promise<string> => {
-      if (!state.instance) {
-        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
-      }
+  const readFile = async (path: string): Promise<string> => {
+    if (!instanceRef.current) {
+      throw new Error('WebContainer not initialized');
+    }
 
-      try {
-        const content = await state.instance.fs.readFile(path, 'utf-8');
-        return content;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to read file';
-        throw new WebContainerError(message, 'FILE_READ_FAILED');
-      }
-    },
-    [state.instance]
-  );
+    try {
+      const content = await instanceRef.current.fs.readFile(path, 'utf-8');
+      return content;
+    } catch (error) {
+      console.error(`Failed to read file ${path}:`, error);
+      throw error;
+    }
+  };
 
-  const runCommand = useCallback(
-    async (command: string, onOutput?: (output: string) => void): Promise<number> => {
-      if (!state.instance) {
-        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
-      }
+  const runCommand = async (command: string, onOutput?: (output: string) => void) => {
+    if (!instanceRef.current) {
+      throw new Error('WebContainer not initialized');
+    }
 
-      try {
-        const process = await state.instance.spawn('sh', ['-c', command]);
+    try {
+      console.log(`Running command: ${command}`);
+      projectStore.addTerminalOutput(`$ ${command}\n`);
 
-        // Pipe output
-        process.output.pipeTo(
-          new WritableStream({
-            write: (chunk: string) => {
-              if (onOutput) onOutput(chunk);
-              projectStore.addTerminalOutput(chunk);
-            },
-          })
-        );
+      const process = await instanceRef.current.spawn('sh', ['-c', command]);
 
-        const exitCode = await process.exit;
-        return exitCode;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Command execution failed';
-        throw new WebContainerError(message, 'COMMAND_EXECUTION_FAILED');
-      }
-    },
-    [state.instance, projectStore]
-  );
+      process.output.pipeTo(
+        new WritableStream({
+          write: (chunk: string) => {
+            onOutput?.(chunk);
+            projectStore.addTerminalOutput(chunk);
+          },
+        })
+      );
 
-  const getServerUrl = useCallback(
-    (port: number = 3000): string | null => {
-      if (!state.instance) return null;
-      try {
-        return state.instance.getNetworkUrl(port);
-      } catch (error) {
-        return null;
-      }
-    },
-    [state.instance]
-  );
+      const exitCode = await process.exit;
+      console.log(`Command completed with exit code: ${exitCode}`);
+      return exitCode;
+    } catch (error) {
+      console.error(`Failed to run command: ${command}`, error);
+      projectStore.addTerminalOutput(`Error: ${error}\n`);
+      throw error;
+    }
+  };
+
+  const getServerUrl = (port: number = 3000): string | null => {
+    if (!instanceRef.current) {
+      return null;
+    }
+    try {
+      const url = instanceRef.current.getNetworkUrl(port);
+      console.log(`Server URL: ${url}`);
+      return url;
+    } catch (error) {
+      console.error('Failed to get server URL:', error);
+      return null;
+    }
+  };
 
   return {
-    instance: state.instance,
-    isReady: state.isReady,
-    error: state.error,
+    ...state,
     writeFile,
     readFile,
     runCommand,
