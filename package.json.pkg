@@ -1,0 +1,21 @@
+{
+  "name": "AI Code Generator",
+  "version": "1.0.0",
+  "description": "AI-powered web development platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WaltGilead/Ai-code-generator"
+  },
+  "keywords": [
+    "ai",
+    "code-generation",
+    "web-development",
+    "webcontainers",
+    "react",
+    "next.js",
+    "live-preview",
+    "code-editor"
+  ],
+  "author": "WaltGilead",
+  "license": "MIT"
+}
