@@ -1,102 +1,124 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { WebContainer } from '@webcontainer/api';
+import { useEffect, useCallback, useState } from 'react';
+import { WebContainer, FileSystemTree } from '@webcontainer/api';
 import { useProjectStore } from '@/store/projectStore';
+import { WebContainerError } from '@/utils/errorHandling';
 
-export interface WebContainerInstance {
+export interface UseWebContainerReturn {
   instance: WebContainer | null;
   isReady: boolean;
   error: string | null;
+  writeFile: (path: string, content: string) => Promise<void>;
+  readFile: (path: string) => Promise<string>;
+  runCommand: (command: string, onOutput?: (output: string) => void) => Promise<number>;
+  getServerUrl: (port?: number) => string | null;
 }
 
-export function useWebContainer() {
-  const [state, setState] = useState<WebContainerInstance>({
-    instance: null,
+export function useWebContainer(): UseWebContainerReturn {
+  const [state, setState] = useState({
+    instance: null as WebContainer | null,
     isReady: false,
-    error: null,
+    error: null as string | null,
   });
 
   const projectStore = useProjectStore();
-  const instanceRef = useRef<WebContainer | null>(null);
 
+  // Boot WebContainer on mount
   useEffect(() => {
-    const bootWebContainer = async () => {
+    const bootContainer = async () => {
       try {
         const instance = await WebContainer.boot();
-        instanceRef.current = instance;
         setState({ instance, isReady: true, error: null });
+        projectStore.setIsRunning(true);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        setState({
-          instance: null,
-          isReady: false,
-          error: errorMessage,
-        });
+        const message = error instanceof Error ? error.message : 'Failed to boot WebContainer';
+        setState({ instance: null, isReady: false, error: message });
       }
     };
 
-    bootWebContainer();
-  }, []);
+    bootContainer();
+  }, [projectStore]);
 
-  const writeFile = async (path: string, content: string) => {
-    if (!instanceRef.current) {
-      throw new Error('WebContainer not initialized');
-    }
+  const writeFile = useCallback(
+    async (path: string, content: string) => {
+      if (!state.instance) {
+        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
+      }
 
-    try {
-      await instanceRef.current.fs.writeFile(path, content);
-      projectStore.updateFile(path, content);
-    } catch (error) {
-      throw new Error(`Failed to write file: ${error}`);
-    }
-  };
+      try {
+        await state.instance.fs.writeFile(path, content);
+        projectStore.updateFile(path, content);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to write file';
+        throw new WebContainerError(message, 'FILE_WRITE_FAILED');
+      }
+    },
+    [state.instance, projectStore]
+  );
 
-  const readFile = async (path: string): Promise<string> => {
-    if (!instanceRef.current) {
-      throw new Error('WebContainer not initialized');
-    }
+  const readFile = useCallback(
+    async (path: string): Promise<string> => {
+      if (!state.instance) {
+        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
+      }
 
-    try {
-      const content = await instanceRef.current.fs.readFile(path, 'utf-8');
-      return content;
-    } catch (error) {
-      throw new Error(`Failed to read file: ${error}`);
-    }
-  };
+      try {
+        const content = await state.instance.fs.readFile(path, 'utf-8');
+        return content;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to read file';
+        throw new WebContainerError(message, 'FILE_READ_FAILED');
+      }
+    },
+    [state.instance]
+  );
 
-  const runCommand = async (command: string, onOutput?: (output: string) => void) => {
-    if (!instanceRef.current) {
-      throw new Error('WebContainer not initialized');
-    }
+  const runCommand = useCallback(
+    async (command: string, onOutput?: (output: string) => void): Promise<number> => {
+      if (!state.instance) {
+        throw new WebContainerError('WebContainer not initialized', 'WEBCONTAINER_NOT_READY');
+      }
 
-    try {
-      const process = await instanceRef.current.spawn('sh', ['-c', command]);
+      try {
+        const process = await state.instance.spawn('sh', ['-c', command]);
 
-      process.output.pipeTo(
-        new WritableStream({
-          write: (chunk: string) => {
-            onOutput?.(chunk);
-            projectStore.addTerminalOutput(chunk);
-          },
-        })
-      );
+        // Pipe output
+        process.output.pipeTo(
+          new WritableStream({
+            write: (chunk: string) => {
+              if (onOutput) onOutput(chunk);
+              projectStore.addTerminalOutput(chunk);
+            },
+          })
+        );
 
-      return await process.exit;
-    } catch (error) {
-      throw new Error(`Failed to run command: ${error}`);
-    }
-  };
+        const exitCode = await process.exit;
+        return exitCode;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Command execution failed';
+        throw new WebContainerError(message, 'COMMAND_EXECUTION_FAILED');
+      }
+    },
+    [state.instance, projectStore]
+  );
 
-  const getServerUrl = (port: number = 3000): string => {
-    if (!instanceRef.current) {
-      return '';
-    }
-    return instanceRef.current.getNetworkUrl(port);
-  };
+  const getServerUrl = useCallback(
+    (port: number = 3000): string | null => {
+      if (!state.instance) return null;
+      try {
+        return state.instance.getNetworkUrl(port);
+      } catch (error) {
+        return null;
+      }
+    },
+    [state.instance]
+  );
 
   return {
-    ...state,
+    instance: state.instance,
+    isReady: state.isReady,
+    error: state.error,
     writeFile,
     readFile,
     runCommand,
